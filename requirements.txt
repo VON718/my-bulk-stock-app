@@ -1,6 +1,5 @@
-Plaintext
-
 streamlit
 yfinance
-pandas_ta
 pandas
+pandas_ta
+plotly
