@@ -2,29 +2,24 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
-import time
 
 # 頁面配置
 st.set_page_config(page_title="專業級美股清單掃描儀", layout="wide")
-
 st.title("🚀 專業級美股清單掃描儀 (Buy Signal 版)")
-st.markdown("本工具會自動偵測 **VCP 收斂** 與 **趨勢強度**，並在條件吻合時發出買入訊號。")
+st.markdown("本工具讀取 **Yahoo Finance** 數據，自動偵測 **VCP 收斂** 與 **趨勢強度**。")
 
-# 1. 用戶輸入名單
+# 用戶輸入名單
 raw_input = st.text_area("請輸入股票代碼 (用逗號或空格隔開)", value="NVDA, TSLA, AAPL, PLTR, AMD, MSFT, META, GOOGL", height=100)
 tickers = [t.strip().upper() for t in raw_input.replace(',', ' ').split() if t.strip()]
 
 def analyze_stock(symbol):
     try:
-        # 下載數據
-        df = yf.download(symbol, period="2y", interval="1d", progress=False, auto_adjust=True)
+        # 改用 Ticker.history，單檔股票格式最純淨，不會有多層 MultiIndex 困擾
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period="2y", interval="1d", auto_adjust=True)
         
         if df.empty or len(df) < 200:
             return None
-        
-        # 處理 yfinance 可能出現的 Multi-Index 欄位 (確保相容性)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
 
         # 計算技術指標
         df['MA50'] = ta.sma(df['Close'], length=50)
@@ -32,6 +27,11 @@ def analyze_stock(symbol):
         df['MA200'] = ta.sma(df['Close'], length=200)
         df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
         
+        # 移除因計算指標產生的空值列
+        df = df.dropna()
+        if len(df) < 25:
+            return None
+
         curr = df.iloc[-1]
         prev_day = df.iloc[-2]
         prev_22 = df.iloc[-22] 
@@ -51,12 +51,11 @@ def analyze_stock(symbol):
         
         vcp_signal = "✅ 正在收斂" if (d1 > d2 and d2 > d3) else "❌ 波動較大"
         
-        # --- 買入訊號邏輯 (Buy Signal) ---
-        # 條件：趨勢 4 分 + 正在收斂 + 最後一節波幅 < 15%
+        # --- 買入訊號邏輯 ---
         action = "觀察中"
         if score == 4 and (d1 > d2 and d2 > d3):
-            if d3 < 0.15: # 波幅縮小到 15% 以內
-                if current_price > float(prev_day['High']): # 突破昨日高點
+            if d3 < 0.15:
+                if current_price > float(prev_day['High']):
                     action = "🔥 立即買入 (Buy)"
                 else:
                     action = "🚀 準備突破 (Ready)"
@@ -84,9 +83,10 @@ def analyze_stock(symbol):
             "量能乾涸": "是" if curr['Volume'] < df['Volume'].tail(20).mean() else "否"
         }
     except Exception as e:
+        # 印出錯誤細節方便除錯
+        st.warning(f"分析 {symbol} 時發生錯誤: {e}")
         return None
 
-# 2. 執行按鈕
 if st.button("開始深度分析清單"):
     if not tickers:
         st.warning("請先輸入代碼。")
@@ -102,25 +102,9 @@ if st.button("開始深度分析清單"):
         
         if results:
             final_df = pd.DataFrame(results)
+            final_df = final_df.sort_values(by=['趨勢分數', '最新價'], ascending=[False, False])
             
-            # 排序：買入訊號優先，分數高優先
-            final_df = final_df.sort_values(by=['建議行動', '趨勢分數'], ascending=[False, False])
-            
-            st.subheader("📊 掃描報表 (自動排序)")
-
-            # 設定顏色高亮函數
-            def highlight_action(row):
-                if "立即買入" in str(row['建議行動']):
-                    return ['background-color: #781d1d; color: white'] * len(row) # 酒紅色
-                elif "準備突破" in str(row['建議行動']):
-                    return ['background-color: #1e3d20; color: white'] * len(row) # 深綠色
-                return [''] * len(row)
-
-            st.dataframe(
-                final_df.style.apply(highlight_action, axis=1),
-                use_container_width=True
-            )
-            
-            st.info("💡 註：酒紅色代表符合所有買入條件；深綠色代表形態已準備好，只差價格突破。")
+            st.subheader("📊 掃描報表")
+            st.dataframe(final_df, use_container_width=True)
         else:
             st.error("分析失敗，未能獲取任何有效數據。")
