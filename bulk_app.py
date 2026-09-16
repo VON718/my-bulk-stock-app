@@ -6,28 +6,59 @@ import pandas_ta as ta
 # 頁面配置
 st.set_page_config(page_title="專業級美股清單掃描儀", layout="wide")
 st.title("🚀 專業級美股清單掃描儀 (Buy Signal 版)")
-st.markdown("本工具讀取 **Yahoo Finance** 數據，自動偵測 **VCP 收斂** 與 **趨勢強度**。")
+st.markdown("本工具整合 **即時市價/盤前盤後報價**，自動偵測 **VCP 收斂** 與 **趨勢強度**。")
 
 # 用戶輸入名單
 raw_input = st.text_area("請輸入股票代碼 (用逗號或空格隔開)", value="NVDA, TSLA, AAPL, PLTR, AMD, MSFT, META, GOOGL", height=100)
 tickers = [t.strip().upper() for t in raw_input.replace(',', ' ').split() if t.strip()]
 
+def get_latest_price(ticker, fallback_price):
+    """
+    多層備援取得最即時成交價：
+    1. fast_info.last_price (低延遲即時撮合價)
+    2. 1分鐘 K 線 (含盤前盤後延長時段)
+    3. 歷史日K收盤價兜底
+    """
+    # 方案 1: fast_info
+    try:
+        fast = ticker.fast_info
+        price = getattr(fast, 'last_price', None) or getattr(fast, 'lastPrice', None)
+        if price is None and hasattr(fast, 'get'):
+            price = fast.get('last_price') or fast.get('lastPrice') or fast.get('regular_market_price')
+        if price is not None and not pd.isna(price) and price > 0:
+            return float(price)
+    except Exception:
+        pass
+
+    # 方案 2: 抓取最新 1 分鐘即時分時數據 (涵蓋 prepost 延長交易時段)
+    try:
+        intra_df = ticker.history(period="1d", interval="1m", prepost=True)
+        if not intra_df.empty and 'Close' in intra_df:
+            latest_intra = intra_df['Close'].dropna()
+            if not latest_intra.empty:
+                return float(latest_intra.iloc[-1])
+    except Exception:
+        pass
+
+    # 方案 3: 兜底歷史收盤價
+    return float(fallback_price)
+
 def analyze_stock(symbol):
     try:
-        # 改用 Ticker.history，單檔股票格式最純淨，不會有多層 MultiIndex 困擾
         ticker = yf.Ticker(symbol)
+        
+        # 1. 抓取歷史數據（計算均線與趨勢指標）
         df = ticker.history(period="2y", interval="1d", auto_adjust=True)
         
         if df.empty or len(df) < 200:
             return None
 
-        # 計算技術指標
+        # 2. 技術指標計算
         df['MA50'] = ta.sma(df['Close'], length=50)
         df['MA150'] = ta.sma(df['Close'], length=150)
         df['MA200'] = ta.sma(df['Close'], length=200)
         df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
         
-        # 移除因計算指標產生的空值列
         df = df.dropna()
         if len(df) < 25:
             return None
@@ -35,10 +66,12 @@ def analyze_stock(symbol):
         curr = df.iloc[-1]
         prev_day = df.iloc[-2]
         prev_22 = df.iloc[-22] 
+
+        # 3. 獲取精準即時價
+        current_price = get_latest_price(ticker, curr['Close'])
         
         # --- 趨勢評分 (0-4) ---
         score = 0
-        current_price = float(curr['Close'])
         if current_price > float(curr['MA150']) and current_price > float(curr['MA200']): score += 1
         if float(curr['MA150']) > float(curr['MA200']): score += 1
         if float(curr['MA200']) > float(prev_22['MA200']): score += 1
@@ -51,7 +84,7 @@ def analyze_stock(symbol):
         
         vcp_signal = "✅ 正在收斂" if (d1 > d2 and d2 > d3) else "❌ 波動較大"
         
-        # --- 買入訊號邏輯 ---
+        # --- 買入訊號邏輯 (Buy Signal) ---
         action = "觀察中"
         if score == 4 and (d1 > d2 and d2 > d3):
             if d3 < 0.15:
@@ -83,10 +116,10 @@ def analyze_stock(symbol):
             "量能乾涸": "是" if curr['Volume'] < df['Volume'].tail(20).mean() else "否"
         }
     except Exception as e:
-        # 印出錯誤細節方便除錯
         st.warning(f"分析 {symbol} 時發生錯誤: {e}")
         return None
 
+# 執行按鈕
 if st.button("開始深度分析清單"):
     if not tickers:
         st.warning("請先輸入代碼。")
@@ -105,6 +138,18 @@ if st.button("開始深度分析清單"):
             final_df = final_df.sort_values(by=['趨勢分數', '最新價'], ascending=[False, False])
             
             st.subheader("📊 掃描報表")
-            st.dataframe(final_df, use_container_width=True)
+
+            def highlight_action(row):
+                if "立即買入" in str(row['建議行動']):
+                    return ['background-color: #781d1d; color: white'] * len(row)
+                elif "準備突破" in str(row['建議行動']):
+                    return ['background-color: #1e3d20; color: white'] * len(row)
+                return [''] * len(row)
+
+            st.dataframe(
+                final_df.style.apply(highlight_action, axis=1),
+                use_container_width=True
+            )
+            st.info("💡 註：最新價已接入交易所即時報價機制（包含盤前/盤後交易時段最新撮合價）。")
         else:
             st.error("分析失敗，未能獲取任何有效數據。")
