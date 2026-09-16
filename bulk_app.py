@@ -48,7 +48,6 @@ with st.sidebar:
 # --- 1. 大盤環境過濾器 (獲取 SPY 與 QQQ) ---
 @st.cache_data(ttl=300)
 def get_market_regime_and_spy():
-    """快取大盤數據，供全域大盤燈號與個股 RS 線共用"""
     try:
         spy = yf.Ticker("SPY").history(period="2y", interval="1d", auto_adjust=True)
         qqq = yf.Ticker("QQQ").history(period="2y", interval="1d", auto_adjust=True)
@@ -104,12 +103,10 @@ def get_latest_market_data(ticker, fallback_price, fallback_vol):
     if today_volume is None: today_volume = float(fallback_vol)
     return latest_price, prev_close, today_volume
 
-# --- 功能 4 輔助：自動計算樞紐高點 (Pivot Point) ---
+# --- 自動計算樞紐高點 (Pivot Point) ---
 def find_auto_pivot(df):
-    """抓出最近 25 日內的局部高點作為 Cheating Pivot"""
     if len(df) < 30:
         return float(df['High'].iloc[-20:-1].max())
-    
     recent_highs = df['High'].iloc[-25:-1]
     if SCIPY_AVAILABLE:
         extrema = argrelextrema(recent_highs.values, np.greater, order=2)[0]
@@ -117,7 +114,7 @@ def find_auto_pivot(df):
             return float(recent_highs.iloc[extrema[-1]])
     return float(recent_highs.max())
 
-# --- 核心分析函式 (整合 功能 1, 2, 4, 5) ---
+# --- 核心分析函式 ---
 def analyze_stock(symbol, capital, risk_budget, spy_history):
     try:
         ticker = yf.Ticker(symbol)
@@ -151,7 +148,7 @@ def analyze_stock(symbol, capital, risk_budget, spy_history):
         pct_above_low = ((current_price - low_52w) / low_52w) * 100
         pct_below_high = ((high_52w - current_price) / high_52w) * 100
 
-        # --- [功能 1] RS 相對強度與「線先於價創新高」偵測 ---
+        # RS 相對強度與「線先於價創新高」偵測
         rs_status = "普通"
         if spy_history is not None and not spy_history.empty:
             aligned_stock = df['Close'].tail(252)
@@ -160,14 +157,13 @@ def analyze_stock(symbol, capital, risk_budget, spy_history):
             rs_52w_high = float(rs_series.max())
             curr_rs = float(rs_series.iloc[-1])
             
-            # RS 達到 52 週新高 (容許 0.5% 誤差) 且 股價尚未創 52 週新高
             if curr_rs >= rs_52w_high * 0.995:
                 if pct_below_high > 3.0:
                     rs_status = "⭐ RS 領先突圍"
                 else:
                     rs_status = "🔥 RS 雙創新高"
 
-        # --- [功能 2] 財報倒數避雷針 ---
+        # 財報倒數避雷針
         earnings_warning = "安全"
         days_to_earnings = 999
         try:
@@ -193,7 +189,7 @@ def analyze_stock(symbol, capital, risk_budget, spy_history):
         except Exception:
             earnings_warning = "無資料"
 
-        # --- [功能 5] 板塊資訊 ---
+        # 板塊資訊
         sector = "其他/未分類"
         try:
             sec = ticker.info.get('sector')
@@ -216,20 +212,17 @@ def analyze_stock(symbol, capital, risk_budget, spy_history):
         w3 = df.tail(10); d3 = (w3['High'].max() - w3['Low'].min()) / w3['High'].max()
         vcp_tight = (d1 > d2 and d2 > d3)
 
-        # 停損與部位
+        # 停損與部位規模
         atr_value = float(curr['ATR'])
         stop_loss = max(0.01, current_price - (atr_value * 1.5))
         risk_per_share = current_price - stop_loss
         suggested_shares = int(risk_budget // risk_per_share) if risk_per_share > 0 else 0
 
-        # [功能 4] 樞紐高點
         pivot_price = find_auto_pivot(df)
 
-        # 建議行動判斷 (含財報避雷強制降級)
         action = "觀察中"
         if score >= 5 and vcp_tight:
             if d3 < 0.15:
-                # 突破昨高或突破樞紐
                 if current_price > float(prev_day['High']):
                     action = "🔥 立即買入 (Buy)"
                 else:
@@ -241,7 +234,7 @@ def analyze_stock(symbol, capital, risk_budget, spy_history):
         else:
             action = "🚫 趨勢偏弱"
 
-        # 財報地雷懲罰機制
+        # 財報避雷強制降級
         if 0 <= days_to_earnings <= 10 and "買入" in action:
             action = f"⚠️ 避開財報 (倒數{days_to_earnings}天)"
 
@@ -265,14 +258,8 @@ def analyze_stock(symbol, capital, risk_budget, spy_history):
     except Exception:
         return None
 
-# --- [功能 3] 個股歷史訊號「微回測引擎」 (Micro-Backtester) ---
+# --- 微回測引擎 (Micro-Backtester) ---
 def run_micro_backtest(df):
-    """
-    對指定個股進行近 2 年 VCP 突破回測：
-    進場：Close > 50MA > 150MA 且 當日 High 突破昨日 High
-    停損：進場價 - 1.5 * ATR
-    停利：風險報酬比 2.5:1 或持倉滿 15 天出場
-    """
     if len(df) < 100:
         return None
     
@@ -292,7 +279,6 @@ def run_micro_backtest(df):
         prev_bar = df.iloc[i-1]
 
         if not in_pos:
-            # 觸發條件
             if (curr_bar['Close'] > curr_bar['MA50'] > curr_bar['MA150']) and (curr_bar['High'] > prev_bar['High']):
                 in_pos = True
                 entry_p = float(prev_bar['High'])
@@ -302,20 +288,14 @@ def run_micro_backtest(df):
                 days_held = 0
         else:
             days_held += 1
-            # 停損觸發
             if curr_bar['Low'] <= stop_p:
-                pnl = (stop_p - entry_p) / entry_p
-                trades.append(pnl)
+                trades.append((stop_p - entry_p) / entry_p)
                 in_pos = False
-            # 停利觸發
             elif curr_bar['High'] >= target_p:
-                pnl = (target_p - entry_p) / entry_p
-                trades.append(pnl)
+                trades.append((target_p - entry_p) / entry_p)
                 in_pos = False
-            # 時間停損
             elif days_held >= 15:
-                pnl = (curr_bar['Close'] - entry_p) / entry_p
-                trades.append(pnl)
+                trades.append((curr_bar['Close'] - entry_p) / entry_p)
                 in_pos = False
 
     if not trades:
@@ -337,62 +317,84 @@ def run_micro_backtest(df):
         "最大單筆虧損 (%)": round(min(trades) * 100, 2)
     }
 
-# --- 繪製 K 線圖 + [功能 4] 自動樞紐突破線 ---
-def plot_stock_chart(symbol, stop_price, pivot_price):
+# --- Plotly 互動式 K 線圖 (包含 5MA/20MA/50MA/100MA/200MA 指定配色) ---
+def plot_stock_chart(symbol, stop_price=None, pivot_price=None):
     ticker = yf.Ticker(symbol)
-    df = ticker.history(period="8mo", interval="1d", auto_adjust=True)
-    if df.empty:
-        st.error("無法加載該標的 K 線圖。")
+    df = ticker.history(period="2y", interval="1d", auto_adjust=True)
+    if df.empty or len(df) < 50:
+        st.error(f"無法取得 {symbol} 足夠的 K 線資料。")
         return df
 
-    df['MA20'] = ta.sma(df['Close'], 20)
-    df['MA50'] = ta.sma(df['Close'], 50)
-    df['MA200'] = ta.sma(df['Close'], 200)
+    # 計算 5 條指定均線
+    df['MA5'] = ta.sma(df['Close'], length=5)
+    df['MA20'] = ta.sma(df['Close'], length=20)
+    df['MA50'] = ta.sma(df['Close'], length=50)
+    df['MA100'] = ta.sma(df['Close'], length=100)
+    df['MA200'] = ta.sma(df['Close'], length=200)
 
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
         vertical_spacing=0.03, row_heights=[0.75, 0.25]
     )
 
-    # 主圖 K 線
+    # 1. 主圖：K線
     fig.add_trace(go.Candlestick(
         x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
-        name="K線", increasing_line_color="#00e676", decreasing_line_color="#ff5252"
+        name="K線", increasing_line_color="#26a69a", decreasing_line_color="#ef5350"
     ), row=1, col=1)
 
-    # 均線系統
-    fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='#ffea00', width=1.2), name="20 MA"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['MA50'], line=dict(color='#2979ff', width=1.5), name="50 MA"), row=1, col=1)
-    if df['MA200'].dropna().shape[0] > 0:
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA200'], line=dict(color='#d500f9', width=1.8), name="200 MA"), row=1, col=1)
+    # 2. 疊加 5 條指定顏色均線
+    ma_settings = [
+        ('MA5', '#FF8D1E', 1.2, "5 MA (橙)"),    # 橙色
+        ('MA20', '#E970DC', 1.4, "20 MA (紫)"),  # 紫色
+        ('MA50', '#22C57E', 1.6, "50 MA (綠)"),  # 綠色
+        ('MA100', '#13FFFF', 1.8, "100 MA (藍)"), # 藍色
+        ('MA200', '#FF6060', 2.0, "200 MA (紅)")  # 紅色
+    ]
 
-    # [功能 4] 自動樞紐突破線 (橘色點虛線)
+    for col_name, color, width, label in ma_settings:
+        if df[col_name].dropna().shape[0] > 0:
+            fig.add_trace(go.Scatter(
+                x=df.index, y=df[col_name],
+                line=dict(color=color, width=width),
+                name=label
+            ), row=1, col=1)
+
+    # 3. 疊加 自動樞紐線 (Pivot) 與 停損線 (Stop Loss)
     if pivot_price:
         fig.add_hline(
-            y=pivot_price, line_dash="dashdot", line_color="#ff9100", line_width=2,
-            annotation_text=f"🔑 Pivot 樞紐位: ${pivot_price:.2f}",
+            y=pivot_price, line_dash="dashdot", line_color="#ffa726", line_width=1.8,
+            annotation_text=f"🔑 Pivot 樞紐: ${pivot_price:.2f}",
             annotation_position="top right", row=1, col=1
         )
 
-    # 停損線 (紅色虛線)
     if stop_price:
         fig.add_hline(
-            y=stop_price, line_dash="dash", line_color="#ff1744", line_width=1.5,
+            y=stop_price, line_dash="dash", line_color="#d32f2f", line_width=1.5,
             annotation_text=f"🛑 建議停損: ${stop_price:.2f}",
             annotation_position="bottom right", row=1, col=1
         )
 
-    # 副圖：量能
-    bar_colors = ['#00e676' if c >= o else '#ff5252' for c, o in zip(df['Close'], df['Open'])]
-    fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=bar_colors, name="成交量"), row=2, col=1)
+    # 4. 副圖：成交量柱狀圖
+    bar_colors = ['#26a69a' if c >= o else '#ef5350' for c, o in zip(df['Close'], df['Open'])]
+    fig.add_trace(go.Bar(
+        x=df.index, y=df['Volume'],
+        marker_color=bar_colors, name="成交量"
+    ), row=2, col=1)
+
+    # 預設聚焦顯示近 6 個月，滑鼠可平移縮放至更早以前
+    start_date = df.index[-1] - pd.DateOffset(months=6)
 
     fig.update_layout(
-        title=f"📈 {symbol} 技術結構 (含 Minervini Cheating Pivot 與 ATR 停損)",
+        title=f"📈 {symbol} 專業多均線分析系統",
         xaxis_rangeslider_visible=False,
-        height=540,
+        height=580,
         margin=dict(l=10, r=10, t=40, b=10),
-        template="plotly_dark"
+        template="plotly_dark",
+        hovermode="x unified",
+        xaxis=dict(range=[start_date, df.index[-1]])
     )
+
     st.plotly_chart(fig, use_container_width=True)
     return df
 
@@ -404,7 +406,7 @@ if st.button("🚀 開始全維度深度掃描") or enable_autorefresh:
     if results:
         final_df = pd.DataFrame(results)
         
-        # --- [功能 5] 板塊集團效應 (Sector Breadth) 展示 ---
+        # 板塊集團動能展示
         st.subheader("🏢 板塊集團動能 (Sector Breadth)")
         sector_group = final_df.groupby('板塊').agg(
             總數=('代碼', 'count'),
@@ -424,7 +426,7 @@ if st.button("🚀 開始全維度深度掃描") or enable_autorefresh:
 
         st.divider()
 
-        # --- 綜合報表展示 ---
+        # 綜合報表展示
         st.subheader("📊 專業篩選矩陣 (自動排序)")
         final_df = final_df.sort_values(by=['建議行動', '距52W高點'], ascending=[False, True])
 
@@ -451,7 +453,7 @@ if st.button("🚀 開始全維度深度掃描") or enable_autorefresh:
         )
         st.dataframe(styled_df, use_container_width=True)
 
-        # --- [功能 3 & 4] K 線視覺確認與微回測引擎 ---
+        # K 線視覺確認與微回測引擎
         st.divider()
         st.subheader("🔬 標的型態二次確認與量化微回測")
 
@@ -465,7 +467,7 @@ if st.button("🚀 開始全維度深度掃描") or enable_autorefresh:
 
         matched_row = final_df[final_df['代碼'] == selected_symbol].iloc[0]
         
-        # 繪製圖表 (疊加 Pivot 線)
+        # 繪製圖表 (包含 5MA/20MA/50MA/100MA/200MA 與 Pivot 線)
         stock_history_df = plot_stock_chart(selected_symbol, matched_row['建議停損'], matched_row['樞紐高點'])
 
         # 執行微回測
